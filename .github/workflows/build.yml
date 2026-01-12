@@ -15,17 +15,18 @@ jobs:
       with:
         python-version: '3.11'
     
+    - name: Install Tesseract OCR
+      run: choco install tesseract -y
+    
     - name: Install dependencies
-      run: |
-        pip install pyinstaller pyautogui pyperclip selenium webdriver-manager
+      run: pip install pyinstaller pyautogui pyperclip selenium webdriver-manager pillow pytesseract
     
     - name: Build executable
-      run: |
-        pyinstaller --onefile --windowed --name "TelegramAutomation" telegram_automation.py
+      run: pyinstaller --onefile --windowed --name "TelegramCodeScanner" telegram_automation.py
     
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: TelegramAutomation-Windows
-        path: dist/TelegramAutomation.exe
+        name: TelegramCodeScanner-Windows
+        path: dist/TelegramCodeScanner.exe
         retention-days: 30
