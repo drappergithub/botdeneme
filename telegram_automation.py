@@ -1,29 +1,14 @@
 #!/usr/bin/env python3
-"""
-Telegram Keyword Automation Tool
-================================
-This tool monitors your clipboard for keywords copied from Telegram,
-then automates pasting and submitting to a target website.
-
-Requirements:
-- Python 3.8+
-- pip install pyautogui pyperclip selenium webdriver-manager
-
-Usage:
-1. Configure settings below
-2. Run: python telegram_automation.py
-3. Copy text containing your keyword from Telegram
-4. The automation will start automatically
-"""
-
 import time
 import threading
 import sys
+import os
+import re
 from datetime import datetime
-
 try:
     import pyautogui
     import pyperclip
+    from PIL import Image, ImageGrab, ImageEnhance
     from selenium import webdriver
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.keys import Keys
@@ -33,394 +18,245 @@ try:
     from selenium.webdriver.support import expected_conditions as EC
     from webdriver_manager.chrome import ChromeDriverManager
 except ImportError as e:
-    print(f"Missing dependency: {e}")
-    print("\nPlease install required packages:")
-    print("pip install pyautogui pyperclip selenium webdriver-manager")
+    print(f"Missing: {e}")
     sys.exit(1)
-
-# ============================================
-# CONFIGURATION - Edit these settings
-# ============================================
-
-CONFIG = {
-    # The keyword to filter for in copied text
-    "keyword_filter": "PROMO",
-    
-    # Target website URL
-    "target_url": "https://example.com/search",
-    
-    # CSS selector for the input field (leave empty to use active element)
-    "input_selector": "input[type='text']",
-    
-    # Interval between Enter key presses (in seconds)
-    "spam_interval_seconds": 2,
-    
-    # Page reset interval (in minutes)
-    "reset_interval_minutes": 15,
-    
-    # Show browser window (False = headless/hidden)
-    "show_browser": True,
-}
-
-# ============================================
-# AUTOMATION ENGINE
-# ============================================
-
-class TelegramAutomation:
+try:
+    import pytesseract
+except ImportError:
+    pytesseract = None
+class TelegramCodeScanner:
     def __init__(self, config):
         self.config = config
         self.driver = None
         self.is_running = False
-        self.last_clipboard = ""
-        self.current_keyword = None
-        self.spam_thread = None
-        self.reset_thread = None
-        self.start_time = None
+        self.last_code = ""
+        self.capture_region = None
         
-    def log(self, message, level="INFO"):
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        print(f"[{timestamp}] [{level}] {message}")
+        if pytesseract and os.path.exists(config.get("tesseract_path", "")):
+            pytesseract.pytesseract.tesseract_cmd = config["tesseract_path"]
+    
+    def log(self, msg):
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
     
     def start_browser(self):
-        """Initialize the Chrome browser"""
         try:
             options = Options()
-            if not self.config["show_browser"]:
+            if not self.config.get("show_browser", True):
                 options.add_argument("--headless")
             options.add_argument("--no-sandbox")
-            options.add_argument("--disable-dev-shm-usage")
-            options.add_argument("--disable-gpu")
-            
             service = Service(ChromeDriverManager().install())
             self.driver = webdriver.Chrome(service=service, options=options)
             self.driver.get(self.config["target_url"])
-            self.log(f"Browser opened: {self.config['target_url']}")
+            self.log(f"Opened: {self.config['target_url']}")
             return True
         except Exception as e:
-            self.log(f"Failed to start browser: {e}", "ERROR")
+            self.log(f"Browser error: {e}")
             return False
     
-    def type_keyword(self, keyword):
-        """Type the keyword into the target input field"""
+    def extract_code(self, image):
+        if not pytesseract:
+            return None
         try:
-            if self.config["input_selector"]:
-                try:
-                    element = WebDriverWait(self.driver, 5).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, self.config["input_selector"]))
-                    )
-                    element.clear()
-                    element.send_keys(keyword)
-                except:
-                    # Fallback: just type into active element
-                    active = self.driver.switch_to.active_element
-                    active.send_keys(keyword)
+            gray = image.convert('L')
+            enhanced = ImageEnhance.Contrast(gray).enhance(2.0)
+            text = pytesseract.image_to_string(enhanced, config='--psm 6')
+            matches = re.findall(self.config.get("code_pattern", r"[A-Z0-9]{6,15}"), text)
+            return max(matches, key=len) if matches else None
+        except:
+            return None
+    
+    def paste_code(self, code):
+        try:
+            elem = WebDriverWait(self.driver, 5).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, self.config["input_selector"]))
+            )
+            elem.clear()
+            elem.send_keys(code)
+            if self.config.get("auto_submit", True):
+                elem.send_keys(Keys.RETURN)
+            self.log(f"Submitted: {code}")
+            return True
+        except Exception as e:
+            self.log(f"Paste error: {e}")
+            return False
+    
+    def scan(self):
+        try:
+            if self.capture_region:
+                img = ImageGrab.grab(bbox=self.capture_region)
             else:
-                active = self.driver.switch_to.active_element
-                active.send_keys(keyword)
-            
-            self.log(f"Typed keyword: {keyword}")
-            return True
+                img = ImageGrab.grab()
+            code = self.extract_code(img)
+            if code and code != self.last_code:
+                self.last_code = code
+                self.log(f"Found code: {code}")
+                self.paste_code(code)
         except Exception as e:
-            self.log(f"Failed to type keyword: {e}", "ERROR")
-            return False
+            self.log(f"Scan error: {e}")
     
-    def press_enter(self):
-        """Press Enter key"""
-        try:
-            active = self.driver.switch_to.active_element
-            active.send_keys(Keys.RETURN)
-            return True
-        except Exception as e:
-            self.log(f"Failed to press Enter: {e}", "ERROR")
-            return False
-    
-    def spam_loop(self):
-        """Continuously press Enter at configured interval"""
-        while self.is_running:
-            if self.driver:
-                self.press_enter()
-            time.sleep(self.config["spam_interval_seconds"])
-    
-    def reset_loop(self):
-        """Reset the page at configured interval"""
-        reset_seconds = self.config["reset_interval_minutes"] * 60
-        while self.is_running:
-            time.sleep(reset_seconds)
-            if self.is_running and self.driver:
-                self.log("Resetting page...")
-                try:
-                    self.driver.refresh()
-                    time.sleep(2)  # Wait for page load
-                    if self.current_keyword:
-                        self.type_keyword(self.current_keyword)
-                except Exception as e:
-                    self.log(f"Reset failed: {e}", "ERROR")
-    
-    def start_automation(self, keyword):
-        """Start the automation with the given keyword"""
-        if self.is_running:
-            self.stop_automation()
-        
-        self.current_keyword = keyword
+    def start(self):
         self.is_running = True
-        self.start_time = datetime.now()
-        
-        self.log(f"Starting automation for keyword: {keyword}")
-        
-        # Start browser
-        if not self.start_browser():
-            self.is_running = False
-            return False
-        
-        # Type initial keyword
-        time.sleep(1)
-        self.type_keyword(keyword)
-        
-        # Start spam thread
-        self.spam_thread = threading.Thread(target=self.spam_loop, daemon=True)
-        self.spam_thread.start()
-        
-        # Start reset thread
-        self.reset_thread = threading.Thread(target=self.reset_loop, daemon=True)
-        self.reset_thread.start()
-        
-        self.log("Automation started! Press Ctrl+C to stop.")
-        return True
+        return self.start_browser()
     
-    def stop_automation(self):
-        """Stop the automation"""
+    def stop(self):
         self.is_running = False
         if self.driver:
-            try:
-                self.driver.quit()
-            except:
-                pass
-            self.driver = None
-        self.log("Automation stopped")
-    
-    def check_clipboard(self):
-        """Check clipboard for keyword"""
-        try:
-            current = pyperclip.paste()
-            if current != self.last_clipboard:
-                self.last_clipboard = current
-                keyword_filter = self.config["keyword_filter"]
-                if keyword_filter.lower() in current.lower():
-                    self.log(f"Keyword detected in clipboard: '{current[:100]}...'")
-                    # Use the ACTUAL copied text from clipboard, not just the filter
-                    # This pastes exactly what the user copied from Telegram
-                    self.start_automation(current.strip())
-        except Exception as e:
-            pass  # Clipboard access might fail sometimes
-    
-    def run(self):
-        """Main loop - monitor clipboard"""
-        self.log("=" * 50)
-        self.log("TELEGRAM AUTOMATION TOOL")
-        self.log("=" * 50)
-        self.log(f"Keyword filter: {self.config['keyword_filter']}")
-        self.log(f"Target URL: {self.config['target_url']}")
-        self.log(f"Spam interval: {self.config['spam_interval_seconds']}s")
-        self.log(f"Reset interval: {self.config['reset_interval_minutes']}m")
-        self.log("=" * 50)
-        self.log("Monitoring clipboard... Copy text from Telegram containing your keyword!")
-        self.log("Press Ctrl+C to exit")
-        self.log("")
-        
-        try:
-            while True:
-                self.check_clipboard()
-                time.sleep(0.5)  # Check every 500ms
-        except KeyboardInterrupt:
-            self.log("\nShutting down...")
-            self.stop_automation()
-            self.log("Goodbye!")
-
-
-# ============================================
-# GUI VERSION (Optional)
-# ============================================
-
+            self.driver.quit()
 def run_gui():
-    """Run with a simple GUI for configuration"""
-    try:
-        import tkinter as tk
-        from tkinter import ttk, messagebox
-    except ImportError:
-        print("tkinter not available, running in CLI mode")
-        return False
+    import tkinter as tk
     
-    class AutomationGUI:
+    class App:
         def __init__(self):
             self.root = tk.Tk()
-            self.root.title("Telegram Automation Tool")
-            self.root.geometry("500x600")
+            self.root.title("Telegram Code Scanner")
+            self.root.geometry("500x650")
             self.root.configure(bg="#1a1a2e")
-            
-            self.automation = None
-            self.monitoring = False
-            
-            self.setup_ui()
+            self.scanner = None
+            self.running = False
+            self.region = None
+            self.setup()
         
-        def setup_ui(self):
-            # Style
-            style = ttk.Style()
-            style.configure("Dark.TFrame", background="#1a1a2e")
-            style.configure("Dark.TLabel", background="#1a1a2e", foreground="#00ffff", font=("Consolas", 10))
-            style.configure("Dark.TEntry", fieldbackground="#16213e", foreground="white")
-            style.configure("Dark.TButton", background="#00ffff", foreground="#1a1a2e")
+        def setup(self):
+            f = tk.Frame(self.root, bg="#1a1a2e", padx=20, pady=20)
+            f.pack(fill="both", expand=True)
             
-            # Main frame
-            main = tk.Frame(self.root, bg="#1a1a2e", padx=20, pady=20)
-            main.pack(fill="both", expand=True)
+            tk.Label(f, text="TELEGRAM CODE SCANNER", font=("Consolas", 14, "bold"), 
+                    bg="#1a1a2e", fg="#00ffff").pack(pady=10)
             
-            # Title
-            title = tk.Label(main, text="TELEGRAM AUTOMATION", font=("Consolas", 16, "bold"), 
-                           bg="#1a1a2e", fg="#00ffff")
-            title.pack(pady=(0, 20))
+            tk.Label(f, text="Target URL:", bg="#1a1a2e", fg="#00ffff").pack(anchor="w")
+            self.url = tk.Entry(f, bg="#16213e", fg="white", insertbackground="white")
+            self.url.pack(fill="x", pady=(0,10))
+            self.url.insert(0, "https://www.jojobet1118.com/active-bonuses")
             
-            # Keyword
-            tk.Label(main, text="Keyword Filter:", bg="#1a1a2e", fg="#00ffff", 
-                    font=("Consolas", 10)).pack(anchor="w")
-            self.keyword_entry = tk.Entry(main, bg="#16213e", fg="white", 
-                                         insertbackground="white", font=("Consolas", 11))
-            self.keyword_entry.pack(fill="x", pady=(0, 10))
-            self.keyword_entry.insert(0, "PROMO")
+            tk.Label(f, text="Input Selector:", bg="#1a1a2e", fg="#00ffff").pack(anchor="w")
+            self.selector = tk.Entry(f, bg="#16213e", fg="white", insertbackground="white")
+            self.selector.pack(fill="x", pady=(0,10))
+            self.selector.insert(0, "input[type='text']")
             
-            # Target URL
-            tk.Label(main, text="Target Website URL:", bg="#1a1a2e", fg="#00ffff",
-                    font=("Consolas", 10)).pack(anchor="w")
-            self.url_entry = tk.Entry(main, bg="#16213e", fg="white",
-                                     insertbackground="white", font=("Consolas", 11))
-            self.url_entry.pack(fill="x", pady=(0, 10))
-            self.url_entry.insert(0, "https://example.com/search")
+            tk.Label(f, text="Code Pattern:", bg="#1a1a2e", fg="#00ffff").pack(anchor="w")
+            self.pattern = tk.Entry(f, bg="#16213e", fg="white", insertbackground="white")
+            self.pattern.pack(fill="x", pady=(0,10))
+            self.pattern.insert(0, r"[A-Z0-9]{6,15}")
             
-            # Input selector
-            tk.Label(main, text="Input Selector (CSS):", bg="#1a1a2e", fg="#00ffff",
-                    font=("Consolas", 10)).pack(anchor="w")
-            self.selector_entry = tk.Entry(main, bg="#16213e", fg="white",
-                                          insertbackground="white", font=("Consolas", 11))
-            self.selector_entry.pack(fill="x", pady=(0, 10))
-            self.selector_entry.insert(0, "input[type='text']")
+            tk.Label(f, text="Scan Interval (sec):", bg="#1a1a2e", fg="#00ffff").pack(anchor="w")
+            self.interval = tk.Entry(f, bg="#16213e", fg="white", insertbackground="white")
+            self.interval.pack(fill="x", pady=(0,10))
+            self.interval.insert(0, "2")
             
-            # Spam interval
-            tk.Label(main, text="Spam Interval (seconds):", bg="#1a1a2e", fg="#00ffff",
-                    font=("Consolas", 10)).pack(anchor="w")
-            self.interval_entry = tk.Entry(main, bg="#16213e", fg="white",
-                                          insertbackground="white", font=("Consolas", 11))
-            self.interval_entry.pack(fill="x", pady=(0, 10))
-            self.interval_entry.insert(0, "2")
+            tk.Label(f, text="Tesseract Path:", bg="#1a1a2e", fg="#00ffff").pack(anchor="w")
+            self.tess = tk.Entry(f, bg="#16213e", fg="white", insertbackground="white")
+            self.tess.pack(fill="x", pady=(0,10))
+            self.tess.insert(0, r"C:\Program Files\Tesseract-OCR\tesseract.exe")
             
-            # Reset interval
-            tk.Label(main, text="Reset Interval (minutes):", bg="#1a1a2e", fg="#00ffff",
-                    font=("Consolas", 10)).pack(anchor="w")
-            self.reset_entry = tk.Entry(main, bg="#16213e", fg="white",
-                                       insertbackground="white", font=("Consolas", 11))
-            self.reset_entry.pack(fill="x", pady=(0, 10))
-            self.reset_entry.insert(0, "15")
+            self.auto_var = tk.BooleanVar(value=True)
+            tk.Checkbutton(f, text="Auto-submit", variable=self.auto_var,
+                          bg="#1a1a2e", fg="#00ffff", selectcolor="#16213e").pack(anchor="w")
             
-            # Show browser checkbox
-            self.show_browser_var = tk.BooleanVar(value=True)
-            tk.Checkbutton(main, text="Show Browser Window", variable=self.show_browser_var,
-                          bg="#1a1a2e", fg="#00ffff", selectcolor="#16213e",
-                          activebackground="#1a1a2e", activeforeground="#00ffff",
-                          font=("Consolas", 10)).pack(anchor="w", pady=(0, 20))
+            self.browser_var = tk.BooleanVar(value=True)
+            tk.Checkbutton(f, text="Show Browser", variable=self.browser_var,
+                          bg="#1a1a2e", fg="#00ffff", selectcolor="#16213e").pack(anchor="w", pady=(0,10))
             
-            # Buttons
-            btn_frame = tk.Frame(main, bg="#1a1a2e")
-            btn_frame.pack(fill="x", pady=10)
+            self.region_lbl = tk.Label(f, text="No region selected", bg="#1a1a2e", fg="#888")
+            self.region_lbl.pack()
             
-            self.start_btn = tk.Button(btn_frame, text="START MONITORING", 
-                                       command=self.toggle_monitoring,
-                                       bg="#00ffff", fg="#1a1a2e", font=("Consolas", 11, "bold"),
-                                       activebackground="#00cccc", cursor="hand2")
-            self.start_btn.pack(fill="x", pady=5)
+            tk.Button(f, text="SELECT REGION", command=self.select_region,
+                     bg="#ff9900", fg="black", font=("Consolas", 10, "bold")).pack(fill="x", pady=5)
             
-            # Status
-            self.status_label = tk.Label(main, text="Status: Idle", 
-                                        bg="#1a1a2e", fg="#888888", font=("Consolas", 10))
-            self.status_label.pack(pady=10)
+            self.btn = tk.Button(f, text="START SCANNING", command=self.toggle,
+                                bg="#00ffff", fg="black", font=("Consolas", 11, "bold"))
+            self.btn.pack(fill="x", pady=5)
             
-            # Log area
-            tk.Label(main, text="Logs:", bg="#1a1a2e", fg="#00ffff",
-                    font=("Consolas", 10)).pack(anchor="w")
+            self.status = tk.Label(f, text="Status: Idle", bg="#1a1a2e", fg="#888")
+            self.status.pack(pady=5)
             
-            self.log_text = tk.Text(main, bg="#16213e", fg="#00ff00", height=10,
-                                   font=("Consolas", 9), insertbackground="white")
-            self.log_text.pack(fill="both", expand=True)
-            
-            # Instructions
-            instructions = tk.Label(main, 
-                text="Copy text from Telegram containing your keyword to trigger automation",
-                bg="#1a1a2e", fg="#666666", font=("Consolas", 9), wraplength=450)
-            instructions.pack(pady=10)
+            tk.Label(f, text="Logs:", bg="#1a1a2e", fg="#00ffff").pack(anchor="w")
+            self.logs = tk.Text(f, bg="#16213e", fg="#0f0", height=8, font=("Consolas", 9))
+            self.logs.pack(fill="both", expand=True)
         
-        def log(self, message):
-            timestamp = datetime.now().strftime("%H:%M:%S")
-            self.log_text.insert("end", f"[{timestamp}] {message}\n")
-            self.log_text.see("end")
+        def log(self, msg):
+            self.logs.insert("end", f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n")
+            self.logs.see("end")
         
-        def toggle_monitoring(self):
-            if not self.monitoring:
-                self.start_monitoring()
+        def select_region(self):
+            self.log("Click and drag to select region...")
+            self.root.iconify()
+            time.sleep(0.3)
+            
+            self.overlay = tk.Toplevel()
+            self.overlay.attributes('-fullscreen', True)
+            self.overlay.attributes('-alpha', 0.3)
+            self.overlay.configure(bg='gray')
+            self.start_pos = None
+            
+            self.canvas = tk.Canvas(self.overlay, highlightthickness=0)
+            self.canvas.pack(fill='both', expand=True)
+            self.rect = None
+            
+            self.overlay.bind('<Button-1>', self.on_press)
+            self.overlay.bind('<B1-Motion>', self.on_drag)
+            self.overlay.bind('<ButtonRelease-1>', self.on_release)
+        
+        def on_press(self, e):
+            self.start_pos = (e.x_root, e.y_root)
+        
+        def on_drag(self, e):
+            if self.start_pos:
+                if self.rect: self.canvas.delete(self.rect)
+                self.rect = self.canvas.create_rectangle(
+                    self.start_pos[0], self.start_pos[1], e.x_root, e.y_root,
+                    outline='red', width=2)
+        
+        def on_release(self, e):
+            if self.start_pos:
+                x1, y1 = self.start_pos
+                x2, y2 = e.x_root, e.y_root
+                self.region = (min(x1,x2), min(y1,y2), max(x1,x2), max(y1,y2))
+                self.region_lbl.config(text=f"Region: {self.region}", fg="#0f0")
+                self.log(f"Region set: {self.region}")
+            self.overlay.destroy()
+            self.root.deiconify()
+        
+        def toggle(self):
+            if not self.running:
+                self.start()
             else:
-                self.stop_monitoring()
+                self.stop()
         
-        def start_monitoring(self):
+        def start(self):
             config = {
-                "keyword_filter": self.keyword_entry.get(),
-                "target_url": self.url_entry.get(),
-                "input_selector": self.selector_entry.get(),
-                "spam_interval_seconds": int(self.interval_entry.get()),
-                "reset_interval_minutes": int(self.reset_entry.get()),
-                "show_browser": self.show_browser_var.get(),
+                "target_url": self.url.get(),
+                "input_selector": self.selector.get(),
+                "code_pattern": self.pattern.get(),
+                "tesseract_path": self.tess.get(),
+                "auto_submit": self.auto_var.get(),
+                "show_browser": self.browser_var.get(),
             }
+            self.scanner = TelegramCodeScanner(config)
+            self.scanner.log = self.log
+            if self.region:
+                self.scanner.capture_region = self.region
             
-            self.automation = TelegramAutomation(config)
-            self.automation.log = self.log  # Redirect logs to GUI
-            
-            self.monitoring = True
-            self.start_btn.configure(text="STOP MONITORING", bg="#ff4444")
-            self.status_label.configure(text="Status: Monitoring clipboard...", fg="#00ff00")
-            self.log("Started monitoring clipboard for keyword: " + config["keyword_filter"])
-            
-            # Start clipboard monitoring in background
-            self.check_clipboard_loop()
+            if self.scanner.start():
+                self.running = True
+                self.btn.config(text="STOP", bg="#ff4444")
+                self.status.config(text="Scanning...", fg="#0f0")
+                self.scan_loop()
         
-        def stop_monitoring(self):
-            self.monitoring = False
-            if self.automation:
-                self.automation.stop_automation()
-            self.start_btn.configure(text="START MONITORING", bg="#00ffff")
-            self.status_label.configure(text="Status: Stopped", fg="#888888")
-            self.log("Monitoring stopped")
+        def stop(self):
+            self.running = False
+            if self.scanner:
+                self.scanner.stop()
+            self.btn.config(text="START SCANNING", bg="#00ffff")
+            self.status.config(text="Stopped", fg="#888")
         
-        def check_clipboard_loop(self):
-            if self.monitoring and self.automation:
-                self.automation.check_clipboard()
-                self.root.after(500, self.check_clipboard_loop)
+        def scan_loop(self):
+            if self.running and self.scanner:
+                self.scanner.scan()
+                self.root.after(int(float(self.interval.get()) * 1000), self.scan_loop)
         
         def run(self):
             self.root.mainloop()
     
-    app = AutomationGUI()
-    app.run()
-    return True
-
-
-# ============================================
-# MAIN ENTRY POINT
-# ============================================
-
+    App().run()
 if __name__ == "__main__":
-    print("Telegram Automation Tool")
-    print("========================")
-    
-    # Try GUI first, fall back to CLI
-    if len(sys.argv) > 1 and sys.argv[1] == "--cli":
-        automation = TelegramAutomation(CONFIG)
-        automation.run()
-    else:
-        if not run_gui():
-            automation = TelegramAutomation(CONFIG)
-            automation.run()
+    run_gui()
