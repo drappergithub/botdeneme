@@ -1,10 +1,8 @@
 name: Build Windows App
-
 on:
   push:
     branches: [main]
   workflow_dispatch:
-
 jobs:
   build:
     runs-on: windows-latest
@@ -23,18 +21,11 @@ jobs:
     
     - name: Build executable
       run: |
-        cd desktop-app
-        pyinstaller --onefile --windowed --name "TelegramAutomation" --icon=NONE telegram_automation.py
+        pyinstaller --onefile --windowed --name "TelegramAutomation" telegram_automation.py
     
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: TelegramAutomation-Windows
-        path: desktop-app/dist/TelegramAutomation.exe
+        path: dist/TelegramAutomation.exe
         retention-days: 30
-    
-    - name: Create Release
-      uses: softprops/action-gh-release@v1
-      if: startsWith(github.ref, 'refs/tags/')
-      with:
-        files: desktop-app/dist/TelegramAutomation.exe
